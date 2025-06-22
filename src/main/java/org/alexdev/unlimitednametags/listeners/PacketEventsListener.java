@@ -8,10 +8,13 @@ import com.github.retrooper.packetevents.protocol.entity.data.EntityData;
 import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.util.Vector3f;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientEntityAction;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerCamera;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityMetadata;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSetPassengers;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerTeams;
+import com.google.common.collect.Maps;
 import org.alexdev.unlimitednametags.UnlimitedNameTags;
+import org.alexdev.unlimitednametags.data.TeamData;
 import org.alexdev.unlimitednametags.hook.ViaVersionHook;
 import org.alexdev.unlimitednametags.packet.PacketNameTag;
 import org.bukkit.Bukkit;
@@ -24,13 +27,20 @@ import java.util.stream.Collectors;
 public class PacketEventsListener extends PacketListenerAbstract {
 
     private final UnlimitedNameTags plugin;
+    private final Map<UUID, Map<String, TeamData>> teams;
 
     public PacketEventsListener(UnlimitedNameTags plugin) {
         this.plugin = plugin;
+        this.teams = Maps.newConcurrentMap();
     }
 
     public void onEnable() {
         PacketEvents.getAPI().getEventManager().registerListener(this);
+    }
+
+    @NotNull
+    public Map<String, TeamData> getTeams(@NotNull UUID player) {
+        return teams.computeIfAbsent(player, p -> Maps.newConcurrentMap());
     }
 
     public void onPacketSend(@NotNull PacketSendEvent event) {
@@ -40,6 +50,25 @@ public class PacketEventsListener extends PacketListenerAbstract {
             handlePassengers(event);
         } else if (event.getPacketType() == PacketType.Play.Server.ENTITY_METADATA) {
             handleMetaData(event);
+        } else if (event.getPacketType() == PacketType.Play.Server.CAMERA) {
+            handleCamera(event);
+        }
+    }
+
+    private void handleCamera(@NotNull PacketSendEvent event) {
+        if (!(event.getPlayer() instanceof Player player)) {
+            return;
+        }
+
+        if (!plugin.getConfigManager().getSettings().isShowCurrentNameTag()) {
+            return;
+        }
+
+        final WrapperPlayServerCamera camera = new WrapperPlayServerCamera(event);
+        if (camera.getCameraId() == player.getEntityId()) {
+            plugin.getNametagManager().getPacketDisplayText(player).ifPresent(PacketNameTag::showForOwner);
+        } else {
+            plugin.getNametagManager().getPacketDisplayText(player).ifPresent(PacketNameTag::hideForOwner);
         }
     }
 
@@ -88,25 +117,117 @@ public class PacketEventsListener extends PacketListenerAbstract {
         }
     }
 
-    private void handleTeams(@NotNull PacketSendEvent event) {
+    private boolean preTeamsChecks(@NotNull PacketSendEvent event) {
         if (!plugin.getConfigManager().getSettings().isDisableDefaultNameTag()) {
-            return;
+            return false;
         }
 
         final Player player = Bukkit.getPlayer(event.getUser().getUUID());
-        if(player == null) {
-            return;
+        if (player == null) {
+            return false;
         }
 
-        if(plugin.getHook(ViaVersionHook.class).map(h -> h.hasNotTextDisplays(player)).orElse(false)) {
+        return !plugin.getHook(ViaVersionHook.class).map(h -> h.hasNotTextDisplays(player)).orElse(false);
+    }
+
+    private void handleTeams(@NotNull PacketSendEvent event) {
+        if (!preTeamsChecks(event)) {
             return;
         }
 
         final WrapperPlayServerTeams packet = new WrapperPlayServerTeams(event);
-        if (packet.getTeamMode() == WrapperPlayServerTeams.TeamMode.CREATE || packet.getTeamMode() == WrapperPlayServerTeams.TeamMode.UPDATE) {
-            packet.getTeamInfo().ifPresent(t -> t.setTagVisibility(WrapperPlayServerTeams.NameTagVisibility.NEVER));
-            event.markForReEncode(true);
+        if (handleForceDisableDefaultNameTag(event, packet)) {
+            return;
         }
+
+        final Map<String, TeamData> teams = getTeams(event.getUser().getUUID());
+        final String teamName = packet.getTeamName();
+
+        switch (packet.getTeamMode()) {
+            case ADD_ENTITIES -> handleAddEntities(event, packet, teams, teamName);
+            case REMOVE_ENTITIES -> handleRemoveEntities(packet, teams, teamName);
+            case CREATE -> handleCreateTeam(event, packet, teams, teamName);
+            case UPDATE -> handleUpdateTeam(event, packet, teams, teamName);
+            case REMOVE -> teams.remove(teamName);
+        }
+    }
+
+    private boolean handleForceDisableDefaultNameTag(@NotNull PacketSendEvent event, @NotNull WrapperPlayServerTeams packet) {
+        if (plugin.getConfigManager().getSettings().isForceDisableDefaultNameTag()) {
+            if (packet.getTeamMode() == WrapperPlayServerTeams.TeamMode.CREATE || packet.getTeamMode() == WrapperPlayServerTeams.TeamMode.UPDATE) {
+                packet.getTeamInfo().ifPresent(t -> t.setTagVisibility(WrapperPlayServerTeams.NameTagVisibility.NEVER));
+                event.markForReEncode(true);
+            }
+            return true;
+        }
+        return false;
+    }
+
+
+    private void handleAddEntities(@NotNull PacketSendEvent event, @NotNull WrapperPlayServerTeams packet,
+                                   @NotNull Map<String, TeamData> teams, @NotNull String teamName) {
+        final Optional<TeamData> teamDataOpt = Optional.ofNullable(teams.get(teamName));
+        if (teamDataOpt.isEmpty()) {
+            return;
+        }
+
+        final TeamData teamData = teamDataOpt.get();
+        teamData.getMembers().addAll(packet.getPlayers());
+
+        if (!teamData.isChangedVisibility() && packet.getPlayers().stream().anyMatch(p -> Bukkit.getPlayer(p) != null)) {
+            teamData.setChangedVisibility(true);
+            final WrapperPlayServerTeams.ScoreBoardTeamInfo teamInfo = teamData.getTeamInfo();
+            teamInfo.setTagVisibility(WrapperPlayServerTeams.NameTagVisibility.NEVER);
+            if (teamData.getTeamInfo() != null) {
+                event.getUser().sendPacket(new WrapperPlayServerTeams(teamName, WrapperPlayServerTeams.TeamMode.UPDATE, teamData.getTeamInfo(), teamData.getMembers()));
+            }
+        }
+    }
+
+    private void handleRemoveEntities(@NotNull WrapperPlayServerTeams packet, @NotNull Map<String, TeamData> teams, @NotNull String teamName) {
+        final Optional<TeamData> teamDataOpt = Optional.ofNullable(teams.get(teamName));
+        teamDataOpt.ifPresent(teamData -> teamData.getMembers().removeAll(packet.getPlayers()));
+    }
+
+    private void handleCreateTeam(@NotNull PacketSendEvent event, @NotNull WrapperPlayServerTeams packet,
+                                  @NotNull Map<String, TeamData> teams, @NotNull String teamName) {
+        if (teams.containsKey(teamName)) {
+            return;
+        }
+
+        packet.getTeamInfo().ifPresent(teamInfo -> {
+            final TeamData teamData = new TeamData(teamName, teamInfo, Set.copyOf(packet.getPlayers()));
+            teams.put(teamName, teamData);
+
+            if (teamData.getMembers().stream().anyMatch(p -> Bukkit.getPlayer(p) != null)) {
+                teamData.setChangedVisibility(true);
+                // Ensure teamInfo is not null before setting visibility
+                if (teamData.getTeamInfo() != null) {
+                    teamData.getTeamInfo().setTagVisibility(WrapperPlayServerTeams.NameTagVisibility.NEVER);
+                    event.markForReEncode(true);
+                }
+            }
+        });
+    }
+
+    private void handleUpdateTeam(@NotNull PacketSendEvent event, @NotNull WrapperPlayServerTeams packet, @NotNull Map<String, TeamData> teams, @NotNull String teamName) {
+        final Optional<TeamData> teamDataOpt = Optional.ofNullable(teams.get(teamName));
+        if (teamDataOpt.isEmpty()) {
+            return;
+        }
+
+        final TeamData teamData = teamDataOpt.get();
+        packet.getTeamInfo().ifPresent(teamInfoFromPacket -> {
+            if (teamData.isChangedVisibility() && teamInfoFromPacket.getTagVisibility() != WrapperPlayServerTeams.NameTagVisibility.NEVER) {
+                teamInfoFromPacket.setTagVisibility(WrapperPlayServerTeams.NameTagVisibility.NEVER);
+                event.markForReEncode(true);
+            }
+            teamData.setTeamInfo(teamInfoFromPacket);
+        });
+    }
+
+    public void removePlayerData(@NotNull Player player) {
+        teams.remove(player.getUniqueId());
     }
 
     private void handleMetaData(@NotNull PacketSendEvent event) {

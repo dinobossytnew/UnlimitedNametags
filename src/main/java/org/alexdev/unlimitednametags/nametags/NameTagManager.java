@@ -58,7 +58,7 @@ public class NameTagManager {
 
     private void loadAll() {
         plugin.getTaskScheduler().runTaskLaterAsynchronously(() -> {
-            Bukkit.getOnlinePlayers().forEach(this::addPlayer);
+            Bukkit.getOnlinePlayers().forEach(p -> addPlayer(p, true));
             this.startTask();
         }, 5);
     }
@@ -200,26 +200,26 @@ public class NameTagManager {
         hideNametags.remove(uuid);
     }
 
-    public void addPlayer(@NotNull Player player) {
+    private boolean preAddChecks(@NotNull Player player, boolean canBlock) {
         if (nameTags.containsKey(player.getUniqueId())) {
             if (debug) {
                 plugin.getLogger().info("Player " + player.getName() + " already has a nametag");
             }
-            return;
+            return false;
         }
 
         if (creating.contains(player.getUniqueId())) {
             if (debug) {
                 plugin.getLogger().info("Player " + player.getName() + " is already creating a nametag");
             }
-            return;
+            return false;
         }
 
         if (blocked.contains(player.getUniqueId())) {
             if (debug) {
                 plugin.getLogger().info("Player " + player.getName() + " is blocked");
             }
-            return;
+            return false;
         } else {
             if (debug) {
                 plugin.getLogger().info("Player " + player.getName() + " is not blocked");
@@ -230,24 +230,38 @@ public class NameTagManager {
             if (debug) {
                 plugin.getLogger().info("Player " + player.getName() + " is not loaded");
             }
-            return;
+            return false;
         }
 
         if (player.hasPotionEffect(PotionEffectType.INVISIBILITY)) {
             if (debug) {
                 plugin.getLogger().info("Player " + player.getName() + " has invisibility potion effect, blocking");
             }
-            blockPlayer(player);
-            return;
+            if (canBlock) {
+                blockPlayer(player);
+            }
+            return false;
         }
 
         if (player.getGameMode() == GameMode.SPECTATOR) {
             if (debug) {
                 plugin.getLogger().info("Player " + player.getName() + " is in spectator mode, skipping");
             }
-            blockPlayer(player);
+            if (canBlock) {
+                blockPlayer(player);
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    public void addPlayer(@NotNull Player player, boolean canBlock) {
+        if (!preAddChecks(player, canBlock)) {
             return;
         }
+
+        creating.add(player.getUniqueId());
 
         final Settings.NameTag nametag = plugin.getConfigManager().getSettings().getNametag(player);
         final PacketNameTag display = new PacketNameTag(plugin, player, nametag);
@@ -265,8 +279,6 @@ public class NameTagManager {
             plugin.getLogger().info("Added nametag for " + player.getName());
         }
         entityIdToDisplay.put(display.getEntityId(), display);
-
-        creating.add(player.getUniqueId());
 
         plugin.getPlaceholderManager().applyPlaceholders(player, nametag.linesGroups(), List.of(player))
                 .thenAccept(lines -> loadDisplay(player, lines.get(player), nametag, display))
@@ -298,6 +310,14 @@ public class NameTagManager {
             display.showToPlayer(player);
         } else if (!show && display.canPlayerSee(player)) {
             display.hideFromPlayer(player);
+        }
+
+        if (force) {
+            if (show) {
+                display.showToPlayer(display.getOwner());
+            } else {
+                display.hideFromPlayer(display.getOwner());
+            }
         }
 
         final List<Player> relationalPlayers = display.getViewers().stream()
@@ -404,20 +424,16 @@ public class NameTagManager {
     }
 
 
-    public void removePlayer(@NotNull Player player, boolean quit) {
+    public void removePlayer(@NotNull Player player) {
         final PacketNameTag packetNameTag = nameTags.remove(player.getUniqueId());
         if (packetNameTag != null) {
             packetNameTag.remove();
+            entityIdToDisplay.remove(packetNameTag.getEntityId());
         }
 
-        entityIdToDisplay.remove(player.getEntityId());
 
         nameTags.forEach((uuid, display) -> {
-            if (quit) {
-                display.handleQuit(player);
-            } else {
-                display.hideFromPlayerSilently(player);
-            }
+            display.handleQuit(player);
             display.getBlocked().remove(player.getUniqueId());
         });
     }
@@ -430,18 +446,24 @@ public class NameTagManager {
         }
     }
 
+    public void showToTrackedPlayers(@NotNull Player player) {
+        showToTrackedPlayers(player, plugin.getTrackerManager().getTrackedPlayers(player.getUniqueId()));
+    }
+
     public void showToTrackedPlayers(@NotNull Player player, @NotNull Collection<UUID> tracked) {
         final PacketNameTag packetNameTag = nameTags.get(player.getUniqueId());
         if (packetNameTag != null) {
             packetNameTag.setVisible(true);
-            packetNameTag.showToPlayers(tracked.stream()
+            final Set<Player> players = tracked.stream()
                     .map(Bukkit::getPlayer)
                     .filter(Objects::nonNull)
-                    .collect(Collectors.toSet()));
+                    .collect(Collectors.toSet());
+            players.add(packetNameTag.getOwner());
+            packetNameTag.showToPlayers(players);
             return;
         }
 
-        addPlayer(player);
+        addPlayer(player, false);
     }
 
     public void hideAllDisplays(@NotNull Player player) {

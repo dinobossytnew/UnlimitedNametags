@@ -57,13 +57,17 @@ public class Settings {
     @Comment("""
             Which text formatter to use (MINIMESSAGE, MINEDOWN, LEGACY or UNIVERSAL)\s
             Take note that UNIVERSAL is the most resource intensive but it supports all formatting options (except for MINEDOWN)\s
-
+            
             (&x&0&8&4&c&f&bc LEGACY OF LEGACY - &#084cfbc LEGACY - &#084cfbc& MINEDOWN - <color:#084cfbc> MINIMESSAGE)""")
     @Setter
     private Formatter format = Formatter.MINIMESSAGE;
 
     @Comment("Whether to disable the default name tag or not.")
     private boolean disableDefaultNameTag = true;
+
+    @Comment("This option works if disableDefaultNameTag is enabled. This will skip the team internal cache and will make all default nametags invisible. " +
+            "The use case is when there is a npc from a plugin that doesn't use display entities / armorstands for nametags, and there is an online player with the name of the npc.")
+    private boolean forceDisableDefaultNameTag = false;
 
     private boolean removeEmptyLines = true;
 
@@ -72,6 +76,17 @@ public class Settings {
 
     @Comment("Whether to see your own NameTag (Similar to nametag mod of Lunar Client)")
     private boolean showCurrentNameTag = false;
+
+    @Comment("""
+            Whether to cache components for some time and reuse them or not.
+             This is useful for performance improvements where a lot of gradients are used, but it uses a bit more memory.
+             It could create problems with MiniPlaceholders, so it is disabled by default.""")
+    private boolean componentCaching = false;
+
+    @Comment("How long to cache placeholders for (in ticks)")
+    private int placeholderCacheTime = 1;
+
+    private boolean enableRelationalPlaceholders = true;
 
     public float getViewDistance() {
         return viewDistance / 160;
